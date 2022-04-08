@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-device = 'cpu'
+device = 'cuda'
 
 from mock5 import Mock5
 from mock5.agent_random import agent as agent_rnd
@@ -27,7 +27,7 @@ def game_to_input(game):
 
 def cut_fouls(game, qvs):
   q = qvs.clone().detach()
-  q[game.empty_tensor(rank=1, dtype=torch.bool)] = float('-inf')
+  q[game.empty_tensor(rank=1, empty=False, non_empty=True, dtype=torch.bool)] = float('-inf')
   return q
 
 #-- DQN
@@ -45,15 +45,16 @@ class SqueezeLayer(torch.nn.Module):
 model = nn.Sequential(
     collections.OrderedDict([
       ("conv1", nn.Conv2d(3, 32, 7, padding='same')),
-      ("relu1", nn.ReLU()),
+      ("pool1", nn.AvgPool2d(2)),
+      ("relu1", nn.LeakyReLU(0.05)),
       ("conv2", nn.Conv2d(32, 64, 3, padding='same')),
-      ("relu2", nn.ReLU()),
-      ("pool1", nn.MaxPool2d(2)),
+      ("pool2", nn.AvgPool2d(2)),
+      ("relu2", nn.LeakyReLU(0.05)),
       ("conv3", nn.Conv2d(64, 128, 3, padding='same')),
-      ("relu3", nn.ReLU()),
+      ("relu3", nn.LeakyReLU(0.05)),
       ("flt", FlattenLayer()),
-      ("lin1", nn.Linear(128 * HEIGHT * WIDTH // 4, 4 * HEIGHT * WIDTH)),
-      ("relu4", nn.ReLU()),
+      ("lin1", nn.Linear(128 * HEIGHT * WIDTH // 16, 4 * HEIGHT * WIDTH)),
+      ("relu4", nn.LeakyReLU(0.05)),
       ("lin2", nn.Linear(4 * HEIGHT * WIDTH, HEIGHT * WIDTH)),
       ("sqz", SqueezeLayer()),
       ])
@@ -61,11 +62,13 @@ model = nn.Sequential(
 
 loss_fn = nn.MSELoss()
 
-gamma = 0.95
+gamma = 0.98
+
+win_reward = HEIGHT * WIDTH
 
 def calc_q(game, idx):
   if not game.place_stone_at_index(idx):
-    return -1.0, game.player
+    return -win_reward, game.player
   else:
     w = game.check_win()
     if w == None:
@@ -75,9 +78,9 @@ def calc_q(game, idx):
     elif w == 0:
       return 0.0, w
     elif w == 3 - game.player:
-      return 1.0, w
+      return win_reward, w
     else:
-      return -1.0, w
+      return -win_reward, w
 
 learning_running = False
 
@@ -90,7 +93,7 @@ def learning_signal_handler(sig, frame):
 def learn():
   global learning_running
 
-  learning_rate = 0.02
+  learning_rate = 0.1
 
   optimizer = optim.SGD(
       model.parameters(),
@@ -98,13 +101,13 @@ def learn():
       momentum=0.9,
       weight_decay=1e-5)
   
-  epsilon = 0.3
+  epsilon = 0.8
 
   n_epoch = 100000
-  dec_ep_epoch = 4000
-  ep_dim = 0.99999
-  ep_lb = 0.05
-  print_interval = 50
+  dec_ep_epoch = 400
+  ep_dim = 0.999
+  ep_lb = 0.2
+  print_interval = 10
 
   n_loss = 0
   acc_loss = 0
@@ -122,12 +125,6 @@ def learn():
       qvs = model(game_to_input(game))
       Y = qvs.clone().detach()
       if rnd < epsilon:
-        r, c = agent_rnd(game)
-        if type(r) is int:
-          idx = game._reduce_index(r, c)
-        else: idx = 0
-        #print("rnd", idx)
-      elif rnd < 2 * epsilon:
         r, c = agent_ab(game)
         if type(r) is int:
           idx = game._reduce_index(r, c)
@@ -149,8 +146,8 @@ def learn():
       if w != None:
         break
     if epoch % print_interval == print_interval - 1:
-      print("{:6d}: e={:.4f}; 100L={:8.4f}"\
-          .format(epoch + 1, epsilon, 100 * acc_loss / n_loss))
+      print("{:6d}: e={:.4f}; L={:8.4f}"\
+          .format(epoch + 1, epsilon, acc_loss / n_loss))
       acc_loss = 0
       n_loss = 0
     if epoch > dec_ep_epoch:
