@@ -44,18 +44,15 @@ class SqueezeLayer(torch.nn.Module):
 
 model = nn.Sequential(
     collections.OrderedDict([
-      ("conv1", nn.Conv2d(3, 32, 7, padding='same')),
-      ("pool1", nn.AvgPool2d(2)),
-      ("relu1", nn.LeakyReLU(0.05)),
-      ("conv2", nn.Conv2d(32, 64, 3, padding='same')),
-      ("pool2", nn.AvgPool2d(2)),
-      ("relu2", nn.LeakyReLU(0.05)),
-      ("conv3", nn.Conv2d(64, 128, 3, padding='same')),
-      ("relu3", nn.LeakyReLU(0.05)),
+      ("conv1", nn.Conv2d(3, 8, 5, padding='same')),
+      #("pool1", nn.AvgPool2d(2)),
+      ("relu1", nn.ReLU()),
+      ("conv3", nn.Conv2d(8, 16, 3, padding='same')),
+      ("relu3", nn.ReLU()),
       ("flt", FlattenLayer()),
-      ("lin1", nn.Linear(128 * HEIGHT * WIDTH // 16, 4 * HEIGHT * WIDTH)),
-      ("relu4", nn.LeakyReLU(0.05)),
-      ("lin2", nn.Linear(4 * HEIGHT * WIDTH, HEIGHT * WIDTH)),
+      ("lin1", nn.Linear(16 * HEIGHT * WIDTH, 2 * HEIGHT * WIDTH)),
+      ("relu4", nn.ReLU()),
+      ("lin2", nn.Linear(2 * HEIGHT * WIDTH, HEIGHT * WIDTH)),
       ("sqz", SqueezeLayer()),
       ])
 ).to(device)
@@ -93,7 +90,7 @@ def learning_signal_handler(sig, frame):
 def learn():
   global learning_running
 
-  learning_rate = 0.1
+  learning_rate = 4e-3
 
   optimizer = optim.SGD(
       model.parameters(),
@@ -103,7 +100,7 @@ def learn():
   
   epsilon = 0.8
 
-  n_epoch = 100000
+  n_epoch = 100
   dec_ep_epoch = 400
   ep_dim = 0.999
   ep_lb = 0.2
@@ -119,22 +116,35 @@ def learn():
   for epoch in range(n_epoch):
     if not learning_running: break
     game = Mock5(HEIGHT, WIDTH)
-    while True:
-      idx = None
-      rnd = np.random.rand()
+
+    winner = None
+    with torch.no_grad():
+      while True:
+        idx = None
+        rnd = np.random.rand()
+        if rnd < epsilon:
+          r, c = agent_ab(game)
+          if type(r) is int:
+            idx = game._reduce_index(r, c)
+          else: idx = 0
+          #print("ab", idx)
+        else:
+          qvs = model(game_to_input(game))
+          idx = torch.argmax(cut_fouls(game, qvs.clone().detach())).item()
+          #print("model", idx)
+        if not game.place_stone_at_index(idx): break
+        winner = game.check_win()
+        if winner is not None: break
+    reward = win_reward
+
+    for _i in range(len(game.history)):
+      last_idx = game.history[-1]
+      game.undo()
+
       qvs = model(game_to_input(game))
       Y = qvs.clone().detach()
-      if rnd < epsilon:
-        r, c = agent_ab(game)
-        if type(r) is int:
-          idx = game._reduce_index(r, c)
-        else: idx = 0
-        #print("ab", idx)
-      else:
-        idx = torch.argmax(cut_fouls(game, qvs.clone().detach())).item()
-        #print("model", idx)
-      nq, w = calc_q(game, idx)
-      Y[idx] = nq
+      # nq, w = calc_q(game, idx)
+      Y[last_idx] = reward
 
       optimizer.zero_grad()
       loss = loss_fn(qvs, Y)
@@ -143,8 +153,9 @@ def learn():
 
       acc_loss += loss.item()
       n_loss += 1
-      if w != None:
-        break
+      
+      reward = -reward
+
     if epoch % print_interval == print_interval - 1:
       print("{:6d}: e={:.4f}; L={:8.4f}"\
           .format(epoch + 1, epsilon, acc_loss / n_loss))
